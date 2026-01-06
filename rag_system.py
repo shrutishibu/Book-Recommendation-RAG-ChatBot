@@ -2,36 +2,39 @@ import os
 import ssl
 import httpx
 import pandas as pd
-from dotenv import load_dotenv
 
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
+from dotenv import load_dotenv
+from typing import List
 
 ssl._create_default_https_context = ssl._create_unverified_context
 load_dotenv()
 
-API_KEY = os.getenv("GENAILAB_API_KEY")
+API_KEY = os.getenv("OPENAI_API_KEY")
 if not API_KEY:
-    raise RuntimeError("❌ GENAILAB_API_KEY not found in .env")
+    raise RuntimeError("OPENAI_API_KEY not found")
 
 client = httpx.Client(verify=False)
 
-FAISS_DIR = "faiss_index"
 CSV_PATH = "data.csv"
+FAISS_DIR = "faiss_index"
+
+conversation_history: List[str] = []
 
 def get_vectorstore():
     embeddings = OpenAIEmbeddings(
-        model="azure/genailab-maas-text-embedding-3-large",
-        base_url="https://genailab.tcs.in",
+        model="PLACEHOLDER_EMBEDDING_MODEL",
+        base_url="PLACEHOLDER_EMBEDDING_ENDPOINT",
         api_key=API_KEY,
         http_client=client
     )
 
     if os.path.exists(FAISS_DIR):
-        print("Loading existing FAISS index...")
+        print("Loading FAISS index...")
         return FAISS.load_local(
             FAISS_DIR,
             embeddings,
@@ -39,36 +42,99 @@ def get_vectorstore():
         )
 
     print("Reading CSV...")
-    df = pd.read_csv(CSV_PATH, encoding="utf-8", errors="ignore")
+    documents = pd.read_csv(CSV_PATH, encoding="utf-8")
 
-    print(f"Rows: {len(df)} | Columns: {len(df.columns)}")
+    print(f"Total rows in CSV: {len(documents)}")
 
-    texts = df.astype(str).apply(
+    # Combine rows into documents
+    docs = documents.astype(str).apply(
         lambda row: " | ".join(row.values),
         axis=1
     ).tolist()
 
-    print("Creating embeddings and FAISS index...")
-    vectorstore = FAISS.from_texts(texts, embedding=embeddings)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=150
+    )
+    chunks = splitter.split_text("\n\n".join(docs))
+
+    print(f"Total chunks created: {len(chunks)}")
+
+    print("Creating FAISS index...")
+    vectorstore = FAISS.from_texts(chunks, embedding=embeddings)
     vectorstore.save_local(FAISS_DIR)
 
-    print("FAISS index created and saved")
+    print("FAISS index created")
+    
     return vectorstore
 
-def get_conversational_chain():
+def rewrite_query(user_query: str, history: List[str]) -> str:
+    """
+    Converts vague follow-ups like 'more' into
+    a fully qualified query using conversation history.
+    """
+    if len(history) == 0:
+        return user_query
+
     llm = ChatOpenAI(
-        model="azure_ai/genailab-maas-DeepSeek-V3-0324",
-        base_url="https://genailab.tcs.in",
+        model="PLACEHOLDER_EMBEDDING_MODEL",
+        base_url="PLACEHOLDER_EMBEDDING_ENDPOINT",
+        api_key=API_KEY,
+        http_client=client,
+        temperature=0
+    )
+
+    prompt = ChatPromptTemplate.from_template(
+        """
+Given the conversation history and the new user query,
+rewrite the query so it is fully self-contained.
+
+Conversation history:
+{history}
+
+User query:
+{query}
+
+Rewritten query:
+"""
+    )
+
+    rewritten = (
+        prompt
+        | llm
+        | StrOutputParser()
+    ).invoke({
+        "history": "\n".join(history[-5:]),
+        "query": user_query
+    })
+
+    return rewritten.strip()
+
+def answer_question(user_query: str):
+    vectorstore = get_vectorstore()
+
+    effective_query = rewrite_query(user_query, conversation_history)
+
+    print(f"\nEffective query: {effective_query}")
+
+    docs = vectorstore.max_marginal_relevance_search(
+        effective_query, 
+        k=5,
+        fetch_k=15)
+    context = "\n\n".join(doc.page_content for doc in docs)
+
+    llm = ChatOpenAI(
+        model="PLACEHOLDER_EMBEDDING_MODEL",
+        base_url="PLACEHOLDER_EMBEDDING_ENDPOINT",
         api_key=API_KEY,
         http_client=client,
         temperature=0.1
     )
 
-    prompt = ChatPromptTemplate.from_template(
+    answer_prompt = ChatPromptTemplate.from_template(
         """
-You are an assistant answering questions ONLY using the provided context.
-If the answer is not present, say:
-"answer is not available in the context"
+Answer using ONLY the context below.
+If not found, say "answer is not available in the context".
 
 Context:
 {context}
@@ -80,40 +146,17 @@ Answer:
 """
     )
 
-    chain = (
-        {
-            "context": RunnablePassthrough(),
-            "question": RunnablePassthrough()
-        }
-        | prompt
+    response = (
+        answer_prompt
         | llm
         | StrOutputParser()
-    )
+    ).invoke({
+        "context": context,
+        "question": effective_query
+    })
 
-    return chain
-
-def answer_question(question: str):
-    vectorstore = get_vectorstore()
-
-    print("\nRunning similarity search...")
-    docs = vectorstore.similarity_search(question, k=3)
-
-    print("\nTop retrieved chunks:")
-    for i, d in enumerate(docs, 1):
-        print(f"\n--- DOC {i} ---")
-        print(d.page_content[:500])
-
-    context = "\n\n".join(doc.page_content for doc in docs)
-
-    chain = get_conversational_chain()
-
-    print("\nGenerating final answer...\n")
-    response = chain.invoke(
-        {
-            "context": context,
-            "question": question
-        }
-    )
+    conversation_history.append(f"User: {user_query}")
+    conversation_history.append(f"Assistant: {response}")
 
     print("\n" + "=" * 70)
     print("FINAL ANSWER:\n")
@@ -121,12 +164,11 @@ def answer_question(question: str):
     print("=" * 70)
 
 if __name__ == "__main__":
-    print("\nCSV RAG Chatbot (type 'exit' to quit)\n")
+    print("\nCSV RAG Chatbot with Memory (type 'exit' to quit)\n")
 
     while True:
-        user_q = input("Question: ").strip()
-        if user_q.lower() in ["exit", "quit"]:
-            print("Exiting.")
+        q = input("Question: ").strip()
+        if q.lower() in ["exit", "quit"]:
             break
-        if user_q:
-            answer_question(user_q)
+        if q:
+            answer_question(q)
