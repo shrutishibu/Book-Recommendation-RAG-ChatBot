@@ -21,6 +21,7 @@ client = httpx.Client(verify=False)
 CSV_PATH = "data.csv"
 FAISS_DIR = "faiss_index"
 
+#Utilizes more tokens than necessary so needs to be removed
 conversation_history: List[str] = []
 
 def get_vectorstore():
