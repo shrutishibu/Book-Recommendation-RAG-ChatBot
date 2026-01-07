@@ -1,5 +1,4 @@
 import os
-import ssl
 import httpx
 import pandas as pd
 
@@ -11,7 +10,6 @@ from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
 from typing import List
 
-ssl._create_default_https_context = ssl._create_unverified_context
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")
